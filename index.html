@@ -6,7 +6,7 @@
   <title>FridgeScan — Smart Expiry Tracker</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
-  <script src="https://unpkg.com/@zxing/browser@latest/umd/index.min.js"></script>
+  <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
   <style>
     :root {
       --bg: #0a0f0d;
@@ -492,8 +492,8 @@
   async function startScanner() {
     const btn = document.getElementById('startBtn');
     try {
-      codeReader = new ZXingBrowser.BrowserMultiFormatReader();
-      const devices = await ZXingBrowser.BrowserCodeReader.listVideoInputDevices();
+      codeReader = new ZXing.BrowserMultiFormatReader();
+      const devices = await codeReader.listVideoInputDevices();
 
       if (!devices.length) {
         showToast('error', '📷', 'No Camera', 'No camera devices found on this device.');
