@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>FridgeScan — Smart Expiry Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/@zxing/browser@latest/umd/index.min.js"></script>
+  <style>
+    :root {
+      --bg: #0a0f0d;
+      --surface: #111a15;
+      --surface2: #162019;
+      --border: #1f3028;
+      --accent: #00e87a;
+      --accent-dim: #00a855;
+      --accent-glow: rgba(0,232,122,0.15);
+      --warn: #ffb830;
+      --danger: #ff4f4f;
+      --text: #d4edd9;
+      --muted: #5a7a62;
+      --mono: 'Space Mono', monospace;
+      --display: 'Syne', sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--display);
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+
+    /* noise texture overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 1000;
+      opacity: 0.4;
+    }
+
+    header {
+      padding: 20px 24px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--surface);
+    }
+
+    .logo {
+      font-family: var(--display);
+      font-weight: 800;
+      font-size: 1.2rem;
+      letter-spacing: -0.02em;
+      color: var(--accent);
+    }
+
+    .logo span { color: var(--text); }
+
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      display: inline-block;
+      margin-right: 6px;
+      transition: background 0.3s;
+    }
+    .status-dot.online { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 2s infinite; }
+    .status-dot.error { background: var(--danger); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .esp-status {
+      font-family: var(--mono);
+      font-size: 0.65rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    /* ── Camera Section ── */
+    .camera-section {
+      position: relative;
+      background: #000;
+      flex-shrink: 0;
+    }
+
+    #video {
+      width: 100%;
+      display: block;
+      max-height: 55dvh;
+      object-fit: cover;
+    }
+
+    .scan-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+
+    .scan-frame {
+      width: 220px;
+      height: 140px;
+      position: relative;
+    }
+
+    .scan-frame::before, .scan-frame::after,
+    .scan-frame .c3, .scan-frame .c4 {
+      content: '';
+      position: absolute;
+      width: 24px;
+      height: 24px;
+      border-color: var(--accent);
+      border-style: solid;
+    }
+    .scan-frame::before { top: 0; left: 0; border-width: 3px 0 0 3px; }
+    .scan-frame::after  { top: 0; right: 0; border-width: 3px 3px 0 0; }
+    .scan-frame .c3     { bottom: 0; left: 0; border-width: 0 0 3px 3px; }
+    .scan-frame .c4     { bottom: 0; right: 0; border-width: 0 3px 3px 0; }
+
+    .scan-line {
+      position: absolute;
+      left: 10px; right: 10px;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      box-shadow: 0 0 8px var(--accent);
+      animation: scanline 2s ease-in-out infinite;
+    }
+
+    @keyframes scanline {
+      0% { top: 10px; opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { top: calc(100% - 10px); opacity: 0; }
+    }
+
+    .camera-label {
+      position: absolute;
+      bottom: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: var(--mono);
+      font-size: 0.6rem;
+      letter-spacing: 0.15em;
+      color: var(--accent);
+      text-transform: uppercase;
+      background: rgba(0,0,0,0.5);
+      padding: 4px 10px;
+      border-radius: 2px;
+      backdrop-filter: blur(4px);
+    }
+
+    /* ── Controls ── */
+    .controls {
+      padding: 16px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .ip-input-wrap {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .ip-label {
+      font-family: var(--mono);
+      font-size: 0.55rem;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    input[type="text"] {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      padding: 8px 12px;
+      border-radius: 4px;
+      outline: none;
+      width: 100%;
+      transition: border-color 0.2s;
+    }
+    input[type="text"]:focus { border-color: var(--accent-dim); }
+    input[type="text"]::placeholder { color: var(--muted); }
+
+    .btn {
+      font-family: var(--display);
+      font-weight: 600;
+      font-size: 0.75rem;
+      letter-spacing: 0.05em;
+      padding: 10px 18px;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+      text-transform: uppercase;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #000;
+    }
+    .btn-primary:hover { background: #00ff87; box-shadow: 0 0 16px var(--accent-glow); }
+    .btn-primary:active { transform: scale(0.97); }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { border-color: var(--muted); color: var(--text); }
+
+    .btn-danger {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid rgba(255,79,79,0.3);
+    }
+    .btn-danger:hover { background: rgba(255,79,79,0.1); }
+
+    /* ── Result Toast ── */
+    .toast {
+      margin: 12px 20px 0;
+      padding: 12px 16px;
+      border-radius: 6px;
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      display: none;
+      align-items: flex-start;
+      gap: 10px;
+      animation: slideIn 0.25s ease;
+    }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(-8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .toast.show { display: flex; }
+    .toast.success { background: rgba(0,232,122,0.08); border: 1px solid rgba(0,232,122,0.3); color: var(--accent); }
+    .toast.warn    { background: rgba(255,184,48,0.08); border: 1px solid rgba(255,184,48,0.3); color: var(--warn); }
+    .toast.error   { background: rgba(255,79,79,0.08); border: 1px solid rgba(255,79,79,0.3); color: var(--danger); }
+
+    .toast-icon { font-size: 1rem; flex-shrink: 0; }
+    .toast-body { flex: 1; }
+    .toast-title { font-weight: 700; margin-bottom: 2px; }
+    .toast-msg { opacity: 0.8; line-height: 1.5; }
+
+    /* ── Scan History ── */
+    .history-section {
+      flex: 1;
+      padding: 16px 20px;
+      overflow-y: auto;
+    }
+
+    .section-heading {
+      font-family: var(--mono);
+      font-size: 0.6rem;
+      letter-spacing: 0.15em;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .section-heading::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    .history-empty {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--muted);
+      text-align: center;
+      padding: 32px 0;
+      line-height: 1.8;
+    }
+
+    .history-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .history-item {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      animation: slideIn 0.2s ease;
+      transition: border-color 0.2s;
+    }
+
+    .history-item:hover { border-color: var(--border); }
+    .history-item.removed { opacity: 0.45; }
+
+    .item-icon {
+      font-size: 1.4rem;
+      flex-shrink: 0;
+    }
+
+    .item-body { flex: 1; min-width: 0; }
+
+    .item-code {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      letter-spacing: 0.04em;
+    }
+
+    .item-meta {
+      font-family: var(--mono);
+      font-size: 0.6rem;
+      color: var(--muted);
+      margin-top: 3px;
+      display: flex;
+      gap: 8px;
+    }
+
+    .item-badge {
+      font-family: var(--mono);
+      font-size: 0.55rem;
+      padding: 2px 7px;
+      border-radius: 2px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      flex-shrink: 0;
+    }
+
+    .badge-active   { background: rgba(0,232,122,0.12); color: var(--accent); border: 1px solid rgba(0,232,122,0.25); }
+    .badge-removed  { background: rgba(255,79,79,0.08); color: var(--danger); border: 1px solid rgba(255,79,79,0.2); }
+
+    /* ── Manual send panel ── */
+    .manual-panel {
+      padding: 12px 20px 20px;
+      background: var(--surface2);
+      border-top: 1px solid var(--border);
+    }
+
+    .manual-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+    }
+
+    .manual-input-wrap {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    /* ── Loader ── */
+    .spinner {
+      display: none;
+      width: 14px; height: 14px;
+      border: 2px solid rgba(0,232,122,0.2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner.show { display: inline-block; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Fridge<span>Scan</span></div>
+  <div class="esp-status">
+    <span class="status-dot" id="espDot"></span>
+    <span id="espStatusText">Not connected</span>
+  </div>
+</header>
+
+<main>
+  <!-- Camera -->
+  <div class="camera-section">
+    <video id="video" autoplay muted playsinline></video>
+    <div class="scan-overlay">
+      <div class="scan-frame">
+        <div class="c3"></div><div class="c4"></div>
+        <div class="scan-line"></div>
+      </div>
+    </div>
+    <div class="camera-label" id="cameraLabel">● LIVE — ALIGN BARCODE</div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <div class="ip-input-wrap">
+      <div class="ip-label">ESP32 IP Address</div>
+      <input type="text" id="espIp" placeholder="192.168.x.x" value="" />
+    </div>
+    <button class="btn btn-ghost" id="pingBtn" onclick="pingESP()">Ping</button>
+    <button class="btn btn-primary" id="startBtn" onclick="toggleScanner()">Start</button>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast">
+    <div class="toast-icon" id="toastIcon"></div>
+    <div class="toast-body">
+      <div class="toast-title" id="toastTitle"></div>
+      <div class="toast-msg" id="toastMsg"></div>
+    </div>
+  </div>
+
+  <!-- Scan History -->
+  <div class="history-section">
+    <div class="section-heading">Scan Log</div>
+    <div id="historyEmpty" class="history-empty">
+      No scans yet.<br>Point camera at a barcode<br>to get started.
+    </div>
+    <div class="history-list" id="historyList"></div>
+  </div>
+
+  <!-- Manual Entry -->
+  <div class="manual-panel">
+    <div class="section-heading">Manual Entry</div>
+    <div class="manual-row">
+      <div class="manual-input-wrap">
+        <div class="ip-label">Barcode / Product Code</div>
+        <input type="text" id="manualCode" placeholder="Enter code manually…" />
+      </div>
+      <button class="btn btn-ghost" onclick="sendManual()">Send</button>
+    </div>
+  </div>
+</main>
+
+<script>
+  // ─── State ───────────────────────────────────────────────
+  let codeReader = null;
+  let scanning   = false;
+  let lastSent   = null;
+  let debounceTimer = null;
+  const history  = [];
+
+  const DEBOUNCE_MS   = 3000; // prevent duplicate rapid sends
+  const TOAST_TIMEOUT = 4000;
+
+  // ─── Scanner ─────────────────────────────────────────────
+  async function toggleScanner() {
+    if (scanning) {
+      stopScanner();
+    } else {
+      await startScanner();
+    }
+  }
+
+  async function startScanner() {
+    const btn = document.getElementById('startBtn');
+    try {
+      codeReader = new ZXingBrowser.BrowserMultiFormatReader();
+      const devices = await ZXingBrowser.BrowserCodeReader.listVideoInputDevices();
+
+      if (!devices.length) {
+        showToast('error', '📷', 'No Camera', 'No camera devices found on this device.');
+        return;
+      }
+
+      // Prefer back camera
+      const cam = devices.find(d => /back|rear|environment/i.test(d.label)) || devices[devices.length - 1];
+
+      await codeReader.decodeFromVideoDevice(cam.deviceId, 'video', (result, err) => {
+        if (result) onBarcodeScan(result.getText());
+      });
+
+      scanning = true;
+      btn.textContent = 'Stop';
+      btn.classList.replace('btn-primary', 'btn-danger');
+      document.getElementById('cameraLabel').textContent = '● SCANNING…';
+
+    } catch (e) {
+      showToast('error', '⚠️', 'Camera Error', e.message || 'Could not access camera.');
+    }
+  }
+
+  function stopScanner() {
+    if (codeReader) {
+      codeReader.reset();
+      codeReader = null;
+    }
+    scanning = false;
+    const btn = document.getElementById('startBtn');
+    btn.textContent = 'Start';
+    btn.classList.replace('btn-danger', 'btn-primary');
+    document.getElementById('cameraLabel').textContent = '● LIVE — ALIGN BARCODE';
+  }
+
+  // ─── Barcode Detected ─────────────────────────────────────
+  function onBarcodeScan(code) {
+    if (!code) return;
+
+    // Debounce: ignore same code within 3s
+    if (code === lastSent && debounceTimer) return;
+
+    lastSent = code;
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => { lastSent = null; }, DEBOUNCE_MS);
+
+    sendToESP(code);
+  }
+
+  // ─── HTTP Send to ESP32 ───────────────────────────────────
+  async function sendToESP(code) {
+    const ip = document.getElementById('espIp').value.trim();
+    if (!ip) {
+      showToast('warn', '📡', 'No IP Set', 'Enter your ESP32 IP address above.');
+      addHistory(code, 'warn', '— No ESP IP set');
+      return;
+    }
+
+    const url = `http://${ip}/scan?code=${encodeURIComponent(code)}`;
+    addHistory(code, 'pending', 'Sending…');
+
+    try {
+      const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(5000) });
+      const text = await res.text();
+
+      if (res.ok) {
+        const action = text.toLowerCase().includes('remov') ? 'removed' : 'added';
+        updateLastHistory(code, action, text);
+        showToast(
+          'success',
+          action === 'removed' ? '🗑️' : '✅',
+          action === 'removed' ? 'Product Removed' : 'Product Added',
+          `Code: ${code}`
+        );
+        setESPStatus(true);
+      } else {
+        updateLastHistory(code, 'error', `HTTP ${res.status}`);
+        showToast('error', '⚠️', `ESP Error ${res.status}`, text || 'Unexpected response.');
+      }
+
+    } catch (err) {
+      const msg = err.name === 'TimeoutError' ? 'Request timed out' : err.message;
+      updateLastHistory(code, 'error', msg);
+      showToast('error', '📡', 'ESP Unreachable', msg);
+      setESPStatus(false);
+    }
+  }
+
+  // ─── Ping ─────────────────────────────────────────────────
+  async function pingESP() {
+    const ip = document.getElementById('espIp').value.trim();
+    if (!ip) { showToast('warn', '📡', 'No IP', 'Enter an IP address first.'); return; }
+
+    const btn = document.getElementById('pingBtn');
+    btn.textContent = '…';
+
+    try {
+      const res = await fetch(`http://${ip}/scan?code=PING`, { signal: AbortSignal.timeout(4000) });
+      setESPStatus(res.ok || res.status < 500);
+      showToast('success', '✅', 'ESP32 Online', `Responded: HTTP ${res.status}`);
+    } catch {
+      setESPStatus(false);
+      showToast('error', '📡', 'ESP32 Offline', 'Could not reach the device.');
+    }
+    btn.textContent = 'Ping';
+  }
+
+  // ─── Manual Send ──────────────────────────────────────────
+  function sendManual() {
+    const code = document.getElementById('manualCode').value.trim();
+    if (!code) return;
+    sendToESP(code);
+    document.getElementById('manualCode').value = '';
+  }
+
+  // ─── History ──────────────────────────────────────────────
+  function addHistory(code, state, note) {
+    const entry = { code, state, note, time: new Date() };
+    history.unshift(entry);
+    renderHistory();
+  }
+
+  function updateLastHistory(code, state, note) {
+    const idx = history.findIndex(h => h.code === code);
+    if (idx !== -1) { history[idx].state = state; history[idx].note = note; }
+    renderHistory();
+  }
+
+  const stateMap = {
+    added:   { badge: 'badge-active',  label: 'ADDED',   icon: '📦' },
+    removed: { badge: 'badge-removed', label: 'REMOVED', icon: '🗑️' },
+    pending: { badge: '',              label: 'SENDING',  icon: '⏳' },
+    error:   { badge: 'badge-removed', label: 'ERROR',   icon: '⚠️' },
+    warn:    { badge: '',              label: 'WARN',     icon: '📡' },
+  };
+
+  function renderHistory() {
+    const list  = document.getElementById('historyList');
+    const empty = document.getElementById('historyEmpty');
+    empty.style.display = history.length ? 'none' : 'block';
+    list.innerHTML = history.slice(0, 20).map(h => {
+      const s = stateMap[h.state] || stateMap.warn;
+      const t = h.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      return `
+        <div class="history-item ${h.state === 'removed' ? 'removed' : ''}">
+          <div class="item-icon">${s.icon}</div>
+          <div class="item-body">
+            <div class="item-code">${h.code}</div>
+            <div class="item-meta"><span>${t}</span><span>${h.note}</span></div>
+          </div>
+          <div class="item-badge ${s.badge}">${s.label}</div>
+        </div>`;
+    }).join('');
+  }
+
+  // ─── Toast ────────────────────────────────────────────────
+  let toastTimer = null;
+  function showToast(type, icon, title, msg) {
+    const el = document.getElementById('toast');
+    el.className = `toast show ${type}`;
+    document.getElementById('toastIcon').textContent  = icon;
+    document.getElementById('toastTitle').textContent = title;
+    document.getElementById('toastMsg').textContent   = msg;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.className = 'toast'; }, TOAST_TIMEOUT);
+  }
+
+  // ─── ESP Status Indicator ─────────────────────────────────
+  function setESPStatus(online) {
+    const dot  = document.getElementById('espDot');
+    const text = document.getElementById('espStatusText');
+    dot.className  = `status-dot ${online ? 'online' : 'error'}`;
+    text.textContent = online ? 'ESP32 Online' : 'ESP32 Offline';
+  }
+
+  // ─── Persist IP ───────────────────────────────────────────
+  const savedIp = localStorage.getItem('espIp');
+  if (savedIp) document.getElementById('espIp').value = savedIp;
+  document.getElementById('espIp').addEventListener('input', e => {
+    localStorage.setItem('espIp', e.target.value.trim());
+  });
+
+  // Enter key on manual input
+  document.getElementById('manualCode').addEventListener('keydown', e => {
+    if (e.key === 'Enter') sendManual();
+  });
+</script>
+</body>
+</html>
